@@ -1,0 +1,270 @@
+---
+title: "ADC-US-RES-22225 SE02 Late Sensor Attenuation"
+author: "Alvin, Lin"
+date: "`r Sys.Date()`"
+date-format: full
+format:
+   html:
+     theme: flatly
+     self-contained: true
+toc: true
+toc-depth: 3
+toc-location: left
+execute:
+  echo: false
+  warning: false 
+  keep-md: true
+---
+
+<!-- AUU \\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-22225\SE02_Glu\UploadData\UUU\RCR-009 -->
+
+<!-- EDC \\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-22225\SE02_Glu\OpenClinica\Final -->
+
+<!-- Study Request \\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-22225 Multi-Analyte Studies\Study Event Requests\SE_02_Glu -->
+
+<!-- DMP \\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-22225 Multi-Analyte Studies\CDM\Study_Binder\Data_Management_Plan\SE02_Glu\Ver_2.0\Approved -->
+
+```{r}
+#| label: Libaray Packages 
+#| message: false
+library(tidyverse)
+library(fs)
+library(UUU)
+library(haven)
+library(pracma)
+library(gt)
+library(highcharter)
+```
+
+```{r}
+#| label: Find all events and gluc files csv
+#| eval: false
+file_list <- dir_ls(gsub("\\\\", "/", r"(\\wf00168p.oneabbott.com\data1\CDM\ADC-US-RES-22225\SE02_Glu\UploadData\UUU\RCR-009)"),recurse = T,glob = "*events.csv|*gluc.csv|*freestyle.csv")
+```
+
+```{r}
+#| label: Filter events, gluc and freestyle
+#| eval: false
+events_path <- filter_path(file_path = file_list)[[1]] 
+gluc_path <- filter_path(file_path = file_list)[[2]]
+free_path <- filter_path(file_path = file_list)[[4]]
+```
+
+```{r}
+#| label: Output UUU.rds
+#| warning: false
+#| eval: false
+saveRDS(apol(events = events_path, gluc = gluc_path),gsub("\\\\", "/", r"(\\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-22225 Multi-Analyte Studies\Statistics\Programs\SE02\AL\Data\UUU.rds)"))
+```
+
+```{r}
+#| label: Import UUU.rds
+UUU <- readRDS(gsub("\\\\", "/", r"(\\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-22225 Multi-Analyte Studies\Statistics\Programs\SE02\AL\Data\UUU.rds)"))
+```
+
+```{r}
+#| label: Create eTime
+UUU <- UUU |> 
+       select(!Path) |> 
+       mutate(eTime = as.numeric(difftime(`Date Time`,first(`Date Time`),units = "hours")),.by = c(`Subject ID`,`Condition ID`,`Sensor Serial Number`))
+```
+
+```{r}
+#| label: Output BG.rds
+#| warning: false
+#| eval: false
+saveRDS(freestyle(freestyle_path = free_path),gsub("\\\\", "/", r"(\\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-22225 Multi-Analyte Studies\Statistics\Programs\SE02\AL\Data\BG.rds)"))
+```
+
+```{r}
+#| label: Import BG.rds
+BG <- readRDS(gsub("\\\\", "/", r"(\\oneabbott.com\dept\ADC\Technical_OPS\Clinical_Affairs\Clinical Study Files\Apollo\ADC-US-RES-22225 Multi-Analyte Studies\Statistics\Programs\SE02\AL\Data\BG.rds)"))
+```
+
+```{r}
+PAIRBG_fun <- function(data){
+  # BG Strips Data
+  BG %>%
+     # Remove Extreme Reference readings <20 or >500
+     filter(between(Reference,20,500)) %>% 
+     inner_join(
+               # Sensor Data
+               data %>%
+                mutate(
+                  `Lower Bound` = case_when(Type %in% c("904","906") ~ `Date Time` - dminutes(5),
+                                            .default = `Date Time` - dminutes(8)),
+                  `Upper Bound` = case_when(Type %in% c("904","906") ~ `Date Time` + dminutes(5),
+                                            .default = `Date Time` + dminutes(8))
+                     ),
+                   by = join_by("Subject ID",between(`BG Date Time`,`Lower Bound`,`Upper Bound`)),
+                   multiple = "all"
+                     ) %>%
+      # Select the nearest time
+      group_by(`Subject ID`,`BG Date Time`) %>%
+      arrange(desc(`Date Time`)) %>%
+      slice_min(abs(`BG Date Time` - `Date Time`),n = 1,with_ties = F) %>%
+      ungroup() %>%
+      # Select the nearest time
+      group_by(`Subject ID`,`Date Time`) %>%
+      arrange(desc(`Date Time`)) %>%
+      slice_min(abs(`BG Date Time` - `Date Time`),n = 1,with_ties = F) %>%
+      ungroup() %>%
+      select(!c(contains("Bound")))
+}
+```
+
+```{r eval = params$analysis}
+Ap <- UUU |> 
+      # Historic Glucose and Real Time Glucose
+      filter(Type == "905") |>
+      # Remove Extreme Gl readings < 40 or > 400
+      filter(between(Gl,40,400)) |> 
+      group_split(`Subject ID`,`Condition ID`,Type,`Sensor Serial Number`) |>  
+      # New anonymous function
+      map(\(df) PAIRBG_fun(data = df),.progress = T) |>
+      # formula syntax
+      # map(~ PAIRBG_fun(data = .x)) %>%
+      list_rbind() |> 
+      # Row-wise Calculation
+      mutate(
+            # Reference glucose values < 100 mg/dL
+            `Difference(mg/dL)` = Gl - Reference,
+            `Absolute Difference(mg/dL)` = abs(`Difference(mg/dL)`),
+            # Reference glucose values >= 100 mg/dL
+            `Relative Difference(%)` = (`Difference(mg/dL)`/Reference)*100,
+            `Absolute Relative Difference(%)` = abs(`Relative Difference(%)`),
+             s_immediate = Gl/Reference
+            # `Hybrid Bias` = case_when(`FreeStyle Reading` < 100 ~ `Difference(mg/dL)`,
+            #                            .default = `Relative Difference(%)`)
+             )
+```
+
+```{r}
+#| label: Left Join median sensitivity with raw Ap
+lsa_median <- Ap |> 
+              filter(Type == "905") |> 
+              left_join(Ap |> 
+                        filter(Type == "905") |>
+                        # Get median based on eTime between 10 hours and 120 hours
+                        filter(between(eTime,10,120)) |> 
+                        group_by(`Subject ID`,`Condition ID`) |> 
+                        summarise(s_median = median(s_immediate, na.rm = T),
+                                  n = sum(!is.na(s_immediate)),.groups = "drop"),
+                        by = join_by("Subject ID","Condition ID")) |> 
+              mutate(s_norm = s_immediate/s_median,
+              .by = c(`Subject ID`,`Condition ID`)) |> 
+              filter(!is.na(s_norm))
+```
+
+```{r}
+#| label: rolling_12hr_window
+rolling_12hr_window <- function(data){
+median_double <- vector("double")
+average_double <- vector("double")
+for (i in 1:nrow(data)) {
+  # 12 hour rolling window
+  avgindex <- between(data$eTime,data$eTime[i] - 6, data$eTime[i] + 6)
+  # avgindex <- data$eTime >= data$eTime[i] - 6 & data$eTime <= data$eTime[i] + 6
+  # If there are >= 3 point within the 12 window and we calculate average and median sensitivity
+  if (length(avgindex) >= 3) {
+    median_double[[i]] <- median(data$s_norm[avgindex],na.rm = T)
+    average_double[[i]] <- mean(data$s_norm[avgindex],na.rm = T)
+  } else {
+    median_double[[i]] <- NA
+    average_double[[i]] <- NA
+  }
+}
+
+rolling_12hr <- data |>
+                bind_cols(
+                # median of s_norm
+                tibble(s_norm.median = median_double),
+                # Average of s_norm
+                tibble(s_norm.mean = average_double) 
+                 ) |>
+                # average and median sensitivity is less than 0.8, it is a LSA Instance
+                mutate(`LSA Instance` = case_when(s_norm.median < 0.8 & s_norm.mean < 0.8 ~ "Yes",
+                                             .default = "No"))
+
+lsaindex <- which(rolling_12hr$`LSA Instance` == "Yes")
+LSAOnset <- vector("double")
+# If there are >= 5 Instance within 24 hour window
+if (length(lsaindex) >= 5) {
+  for (i in 1:(length(lsaindex) - 4)) {
+      # Open 24hr window
+    if (rolling_12hr$eTime[lsaindex][i+4] - rolling_12hr$eTime[lsaindex][i] <= 24) {
+      # Find the first LSA Instance
+      LSAOnset[[i]] <- rolling_12hr$eTime[lsaindex][i]
+      break 
+    }
+  }
+}
+
+rolling_12hr[lsaindex,] |> 
+             bind_cols(`LSA Onset Time(Hr)` = first(na.omit(LSAOnset))) |>     
+             filter(any(last(eTime) - `LSA Onset Time(Hr)` > 24))
+
+}
+```
+ 
+```{r}
+#| label: linear interpolate function
+linear_interpolate <- function(data) { 
+     
+     if (nrow(data) != 1) {
+             # Create Empty list for x(time) y(s_norminterp)
+            x <- vector("list")
+            y <- vector("list")
+            
+            for (i in 1:(nrow(data)-1)) {
+              j <- 0  
+              while(data$eTime[i]+(1/60)*j <= data$eTime[i+1]) {
+                 x <- append(x,approx(x = c(data$eTime[i],data$eTime[i+1]), 
+                                      y = c(data$s_norm[i],data$s_norm[i+1]), 
+                                      xout = data$eTime[i]+(1/60)*j)$x)
+                 y <- append(y,approx(x = c(data$eTime[i],data$eTime[i+1]), 
+                                      y = c(data$s_norm[i],data$s_norm[i+1]), 
+                                      xout = data$eTime[i]+(1/60)*j)$y)
+                 j <- j + 1
+              }
+            }
+          # Add Subject ID
+          data |>
+            select(`Subject ID`:`Condition ID`,`LSA Onset Time(Hr)`) |>
+            slice(1) |>
+            bind_cols(
+                     enframe(x) |>
+                     unnest(value) |>
+                     select(eTime = value),
+                            enframe(y) |>
+                            unnest(value) |>
+                            select(s_norm = value)) |> 
+          # Add last observation
+          add_row(eTime = data |> slice(n()) |> pull(eTime),
+                  s_norm = data |> slice(n()) |> pull(s_norm)) |> 
+          fill(`Subject ID`,`Condition ID`,`LSA Onset Time(Hr)`,.direction = "down")
+     } 
+}
+``` 
+
+```{r}
+#| label: LSA Index
+lsa_index <- lsa_median |>
+             group_split(`Subject ID`,`Condition ID`,`Sensor Serial Number`) |>
+             map(\(df) rolling_12hr_window(df),.progress = T) |>
+             map(\(df) df |> distinct(`Subject ID`,`Condition ID`,`LSA Onset Time(Hr)`)) |>
+             list_rbind() |> 
+            bind_cols(
+                lsa_median |>
+                 group_split(`Subject ID`,`Condition ID`,`Sensor Serial Number`) |>
+                 map(\(df) rolling_12hr_window(df),.progress = T) |>
+                 keep(\(df) nrow(df) > 0) |>
+                 # map(\(df) df |> filter(!is.na(s_norm)))  |>
+                 map(\(df) linear_interpolate(df),.progress = T) |>
+                 map(\(df) df |> filter(s_norm < 1)) |>
+                 map(\(df) trapz(x = df$eTime, y = (df$s_norm) - 1)/(last(df$eTime) - first(df$eTime))*100,.progress = T) |>
+                 enframe(value = "LSA Index") |>
+                          unnest(`LSA Index`) |>
+                          select(!name))
+```
+
